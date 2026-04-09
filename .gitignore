@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Environment Files
+.env
+
+# Framework Specific
+.chainlit/
+.gemini/
+
+# Auto-Generated Outputs (Keep directory structure but ignore files)
+outputs/*
+!outputs/.gitkeep

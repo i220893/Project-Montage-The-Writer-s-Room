@@ -1,0 +1,36 @@
+# ── Writer's Room: Project Montage Phase 1 ──────────────────────────────────
+# Install: pip install -r requirements.txt
+
+# UI
+chainlit>=2.0.0
+
+# LangChain core stack
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+
+# LLM providers — swap via config.py, not code changes
+langchain-groq>=0.2.0          # Groq (Llama 3.x)  ← primary
+langchain-google-genai>=2.0.0  # Gemini (optional fallback)
+langchain-ollama>=0.2.0        # Ollama local models (future)
+
+# MCP
+mcp[server]>=1.0.0
+langchain-mcp-adapters>=0.1.0
+
+# LangGraph
+langgraph>=0.2.0
+
+# Vector DB
+faiss-cpu>=1.7.4
+langchain-huggingface>=0.1.0
+sentence-transformers>=3.0.0
+
+# Image Generation
+google-genai>=1.0.0            # gemini-2.0-flash-preview-image-generation
+
+# Utilities
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+httpx>=0.27.0
+pillow>=10.0.0
