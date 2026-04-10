@@ -160,6 +160,7 @@ async def character_designer_node(state: dict) -> dict:
                     logger.info("[CharacterDesigner] Fallback extraction succeeded: %d characters.", len(character_db))
                 except Exception as fallback_exc:
                     logger.error("[CharacterDesigner] Fallback extraction failed: %s", fallback_exc)
+                    raise ValueError(f"Character extraction failed on fallback: {fallback_exc}\nLLM returned: {result_str[:200]}")
 
     except Exception as exc:
         logger.error("[CharacterDesigner] Error: %s", exc, exc_info=True)

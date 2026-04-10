@@ -89,7 +89,7 @@ def build_graph(enable_hitl: bool = True) -> StateGraph:
     Returns:
         A compiled LangGraph CompiledGraph ready for ainvoke / astream.
     """
-    builder = StateGraph(dict)
+    builder = StateGraph(WritersRoomState)
 
     # ── Register nodes ────────────────────────────────────────────────────────
     builder.add_node("scriptwriter",        scriptwriter_node)

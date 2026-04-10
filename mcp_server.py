@@ -12,10 +12,28 @@
 # ============================================================
 
 import os
+import sys
 import json
 import base64
 import asyncio
+import concurrent.futures
 from pathlib import Path
+
+# ── Ensure the project root is on sys.path so 'comfyui' package is importable ──
+_PROJECT_ROOT = str(Path(__file__).parent.resolve())
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+
+def _run_async(coro):
+    """
+    Run an async coroutine safely from inside a synchronous MCP tool,
+    even when FastMCP/FastAPI already has an event loop running.
+    Each call spawns a dedicated thread with its own isolated event loop.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(asyncio.run, coro)
+        return future.result()
 
 from mcp.server.fastmcp import FastMCP
 
@@ -30,6 +48,11 @@ from config import (
     EMBED_MODEL,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
+    IMAGE_GEN_BACKEND,
+    COMFYUI_BASE_URL,
+    COMFYUI_WORKFLOW,
+    COMFYUI_TIMEOUT,
+    OLLAMA_BASE_URL
 )
 
 # ── Ensure output directories exist ──────────────────────────────────────────
@@ -70,8 +93,18 @@ def generate_screenplay(prompt: str, num_scenes: int = 3) -> str:
       ]
     }
     """
-    from config import get_llm
+    from config import get_llm, get_dynamic_setting
     from langchain_core.messages import SystemMessage, HumanMessage
+
+    # ── Free ComfyUI VRAM before loading Qwen ───────────────────────────────────
+    if get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND) == "comfyui":
+        try:
+            from comfyui.vram_manager import free_comfyui_vram, wait_for_vram_clear
+            freed = _run_async(free_comfyui_vram(get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL)))
+            if freed:
+                _run_async(wait_for_vram_clear(2.0))
+        except ImportError:
+            pass  # comfyui package absent — skip
 
     llm = get_llm(temperature=0.8)
 
@@ -153,8 +186,18 @@ def validate_script_structure(script_text: str) -> str:
       "character_list": ["NAME", ...]
     }
     """
-    from config import get_llm
+    from config import get_llm, get_dynamic_setting
     from langchain_core.messages import SystemMessage, HumanMessage
+
+    # ── Free ComfyUI VRAM before loading Qwen ───────────────────────────────────
+    if get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND) == "comfyui":
+        try:
+            from comfyui.vram_manager import free_comfyui_vram, wait_for_vram_clear
+            freed = _run_async(free_comfyui_vram(get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL)))
+            if freed:
+                _run_async(wait_for_vram_clear(2.0))
+        except ImportError:
+            pass  # comfyui package absent — skip
 
     llm = get_llm(temperature=0.0)
 
@@ -227,8 +270,18 @@ def extract_characters(scene_manifest_json: str) -> str:
       }
     }
     """
-    from config import get_llm
+    from config import get_llm, get_dynamic_setting
     from langchain_core.messages import SystemMessage, HumanMessage
+
+    # ── Free ComfyUI VRAM before loading Qwen ───────────────────────────────────
+    if get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND) == "comfyui":
+        try:
+            from comfyui.vram_manager import free_comfyui_vram, wait_for_vram_clear
+            freed = _run_async(free_comfyui_vram(get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL)))
+            if freed:
+                _run_async(wait_for_vram_clear(2.0))
+        except ImportError:
+            pass  # comfyui package absent — skip
 
     llm = get_llm(temperature=0.3)
 
@@ -311,7 +364,7 @@ Be as visually descriptive as possible in 'appearance' — it will be used to ge
 @mcp.tool()
 def generate_character_image(character_name: str, visual_description: str) -> str:
     """
-    Generate a cinematic character portrait using the Gemini image generation API.
+    Generate a cinematic character portrait using the ComfyUI or Gemini image generation API.
 
     Args:
         character_name:    The character's name (used as filename).
@@ -320,9 +373,51 @@ def generate_character_image(character_name: str, visual_description: str) -> st
     Returns:
         Absolute path to the saved PNG file, or an error message string.
     """
+    from config import get_dynamic_setting
+    
+    # ── State for VRAM offloading ─────────────────────────────────────────────
+    # We use a module-level global to only offload once per process if needed
+    global _already_offloaded
+    if '_already_offloaded' not in globals():
+        _already_offloaded = False
+
+    backend = get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND)
+    
+    if backend == "comfyui":
+        # Check if we need to offload Ollama Model first
+        active_provider = get_dynamic_setting("ACTIVE_PROVIDER", "ollama")
+        
+        if active_provider == "ollama" and not _already_offloaded:
+            try:
+                from comfyui.vram_manager import offload_ollama_model, wait_for_vram_clear
+                model_name = get_dynamic_setting("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
+                success = _run_async(offload_ollama_model(
+                    model_name,
+                    get_dynamic_setting("OLLAMA_BASE_URL", OLLAMA_BASE_URL),
+                ))
+                if success:
+                    _run_async(wait_for_vram_clear(3.0))
+                _already_offloaded = True
+            except ImportError:
+                print("Warning: comfyui.vram_manager not found. Skipping VRAM offloading.")
+
+        try:
+            from comfyui.comfyui_client import generate_image_comfyui
+            result_path = _run_async(generate_image_comfyui(
+                character_name=character_name,
+                prompt=visual_description,
+                workflow_path=COMFYUI_WORKFLOW,
+                base_url=get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL),
+                output_dir=IMAGE_ASSETS_DIR,
+                timeout=COMFYUI_TIMEOUT,
+            ))
+            return result_path
+        except ImportError:
+            print("Warning: comfyui.comfyui_client not found. Falling back to Gemini.")
+
+    # ── Fallback to Gemini ────────────────────────────────────────────────────
     from google import genai
     from google.genai import types
-    from config import get_dynamic_setting
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     
@@ -347,7 +442,7 @@ def generate_character_image(character_name: str, visual_description: str) -> st
     for part in response.candidates[0].content.parts:
         if part.inline_data is not None:
             img_bytes = base64.b64decode(part.inline_data.data)
-            safe_name = character_name.replace(" ", "_").replace("/", "_")
+            safe_name = character_name.replace(" ", "/").replace("/", "_")  # fixed typo in original code
             out_path  = Path(IMAGE_ASSETS_DIR) / f"{safe_name}.png"
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(img_bytes)

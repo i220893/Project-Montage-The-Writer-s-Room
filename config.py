@@ -50,6 +50,15 @@ IMAGE_ASSETS_DIR: str = "./outputs/image_assets"
 SCENE_MANIFEST: str   = "./outputs/scene_manifest.json"
 CHARACTER_DB: str     = "./outputs/character_db.json"
 
+# ── ComfyUI (local image generation) ─────────────────────────────────────────
+COMFYUI_BASE_URL: str   = os.getenv("COMFYUI_BASE_URL", "http://127.0.0.1:8188")
+COMFYUI_WORKFLOW: str   = os.getenv("COMFYUI_WORKFLOW", "./comfyui/image_flux2_text_to_image_9b.json")
+COMFYUI_TIMEOUT: int    = int(os.getenv("COMFYUI_TIMEOUT", "300"))  # seconds
+
+# ── Image generation backend ─────────────────────────────────────────────────
+# Default: "comfyui" | Fallback: "gemini"
+IMAGE_GEN_BACKEND: str  = os.getenv("IMAGE_GEN_BACKEND", "comfyui")
+
 
 def get_llm(temperature: float = 0.7):
     """

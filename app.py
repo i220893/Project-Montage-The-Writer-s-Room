@@ -11,7 +11,13 @@
 import json
 import logging
 import os
+import sys
 from pathlib import Path
+
+# ── Ensure project root is on sys.path so 'comfyui' package is importable ─────────────
+_PROJECT_ROOT = str(Path(__file__).parent.resolve())
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 import chainlit as cl
 from langchain_core.messages import HumanMessage
@@ -58,17 +64,52 @@ async def on_start():
             initial_index=0,
         ),
         cl.input_widget.Select(
+            id="IMAGE_GEN_BACKEND",
+            label="Image Generation Backend",
+            values=["comfyui", "gemini"],
+            initial_index=["comfyui", "gemini"].index(get_dynamic_setting("IMAGE_GEN_BACKEND", "comfyui")),
+        ),
+        cl.input_widget.Select(
+            id="COMFYUI_WORKFLOW_NAME",
+            label="ComfyUI Workflow",
+            values=["flux_dev", "flux_schnell"],
+            initial_index=0,
+        ),
+        cl.input_widget.Select(
             id="IMAGE_GEN_MODEL",
-            label="Image Generation Model (Gemini)",
+            label="Gemini Image Model (fallback only)",
             values=["gemini-2.0-flash-preview-image-generation", "gemini-2.5-flash-image", "gemini-3.0-pro-image"],
             initial_index=1,
         )
     ]).send()
+    
+    # Check ComfyUI Status
+    import asyncio
+    try:
+        from comfyui.comfyui_client import check_comfyui_reachable
+        comfyui_installed = True
+        comfy_online = await check_comfyui_reachable(get_dynamic_setting("COMFYUI_BASE_URL", "http://127.0.0.1:8188"), timeout=5.0)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to initialize ComfyUI module: {e}")
+        comfyui_installed = False
+        comfy_online = False
+    
+    if get_dynamic_setting("IMAGE_GEN_BACKEND", "comfyui") == "comfyui":
+        if comfyui_installed and comfy_online:
+            comfy_status = "✅ `ComfyUI Online — Flux model ready`"
+        elif comfyui_installed and not comfy_online:
+            comfy_status = "⚠️ `ComfyUI Offline — will fallback to Gemini`"
+        else:
+            comfy_status = f"⚠️ `ComfyUI module error — will fallback to Gemini`"
+    else:
+        comfy_status = "ℹ️ `ComfyUI unused (Gemini selected in settings)`"
 
     await cl.Message(
         content=(
             "# 🎬 The Writer's Room\n"
             f"*Powered by {model_info()} · MCP Tool Discovery · FAISS Memory*\n\n"
+            f"{comfy_status}\n\n"
             "---\n\n"
             "I'm your autonomous creative production assistant. I can:\n"
             "- 📝 **Generate** a full screenplay from your story idea\n"
@@ -153,37 +194,53 @@ async def _run_pipeline(user_input: str, mode: str, thread_config: dict):
     ).send()
 
     try:
-        async for chunk in graph.astream(state, config=thread_config):
-            for node_name, node_state in chunk.items():
+        hitl_errors = None
+        stream_gen = graph.astream(state, config=thread_config)
+        
+        try:
+            async for chunk in stream_gen:
+                for node_name, node_state in chunk.items():
+                    # ── Skip internal LangGraph system events ──────────────────
+                    if not isinstance(node_state, dict):
+                        continue
 
-                # ── Skip internal LangGraph system events ──────────────────
-                if not isinstance(node_state, dict):
-                    continue
+                    # ── Per-node progress update ───────────────────────────────
+                    emoji = {
+                        "scriptwriter":       "✍️",
+                        "validator":          "🔍",
+                        "character_designer": "👥",
+                        "image_synthesizer":  "🎨",
+                    }.get(node_name, "⚙️")
 
-                # ── Per-node progress update ───────────────────────────────
-                emoji = {
-                    "scriptwriter":       "✍️",
-                    "validator":          "🔍",
-                    "character_designer": "👥",
-                    "image_synthesizer":  "🎨",
-                }.get(node_name, "⚙️")
-
-                await cl.Message(
-                    content=f"{emoji} **[{node_name.replace('_', ' ').title()}]** — completed",
-                    author=node_name,
-                ).send()
-
-                # ── Error handling ──────────────────────────────────────────
-                if node_state.get("error"):
                     await cl.Message(
-                        content=f"❌ **Error in {node_name}:**\n```\n{node_state['error']}\n```"
+                        content=f"{emoji} **[{node_name.replace('_', ' ').title()}]** — completed",
+                        author=node_name,
                     ).send()
-                    return
 
-                # ── HITL: validator found errors → display buttons + stop ──
-                if node_name == "validator" and node_state.get("validation_errors"):
-                    await _trigger_hitl(node_state["validation_errors"], thread_config)
-                    return  # stop processing — wait for button click in action callback
+                    # ── Error handling ──────────────────────────────────────────
+                    if node_state.get("error"):
+                        await cl.Message(
+                            content=f"❌ **Error in {node_name}:**\n```\n{node_state['error']}\n```"
+                        ).send()
+                        return
+
+                    # ── HITL: validator found errors → display buttons + stop ──
+                    if node_name == "validator" and node_state.get("validation_errors"):
+                        hitl_errors = node_state["validation_errors"]
+                        break  # break inner loop
+            
+                if hitl_errors:
+                    break  # break outer loop
+
+        finally:
+            try:
+                await stream_gen.aclose()
+            except RuntimeError:
+                pass  # suppress "async generator ignored GeneratorExit" from LangGraph
+
+        if hitl_errors:
+            await _trigger_hitl(hitl_errors, thread_config)
+            return
 
         # ── Stream finished — check if graph is truly done or just interrupted ──
         state_snapshot = graph.get_state(thread_config)
@@ -302,27 +359,32 @@ async def _resume_after_hitl(approved: bool, thread_config: dict):
     # Resume the graph from the checkpoint (pass None as input to continue)
     error_occurred = False
     try:
-        stream = graph.astream(None, config=thread_config)
-        async for chunk in stream:
-            for node_name, node_state in chunk.items():
-                emoji = {
-                    "character_designer": "👥",
-                    "image_synthesizer":  "🎨",
-                }.get(node_name, "⚙️")
-                await cl.Message(
-                    content=f"{emoji} **[{node_name.replace('_', ' ').title()}]** — completed",
-                    author=node_name,
-                ).send()
-
-                if isinstance(node_state, dict) and node_state.get("error"):
+        stream_gen = graph.astream(None, config=thread_config)
+        try:
+            async for chunk in stream_gen:
+                for node_name, node_state in chunk.items():
+                    emoji = {
+                        "character_designer": "👥",
+                        "image_synthesizer":  "🎨",
+                    }.get(node_name, "⚙️")
                     await cl.Message(
-                        content=f"❌ **Error in {node_name}:**\n```\n{node_state['error']}\n```"
+                        content=f"{emoji} **[{node_name.replace('_', ' ').title()}]** — completed",
+                        author=node_name,
                     ).send()
-                    error_occurred = True
-                    break  # break inner loop
-            if error_occurred:
-                await stream.aclose()  # Properly close the generator
-                break  # break outer loop
+
+                    if isinstance(node_state, dict) and node_state.get("error"):
+                        await cl.Message(
+                            content=f"❌ **Error in {node_name}:**\n```\n{node_state['error']}\n```"
+                        ).send()
+                        error_occurred = True
+                        break  # break inner loop
+                if error_occurred:
+                    break  # break outer loop
+        finally:
+            try:
+                await stream_gen.aclose()
+            except RuntimeError:
+                pass  # suppress "async generator ignored GeneratorExit" from LangGraph
 
         if not error_occurred:
             final = graph.get_state(thread_config).values
