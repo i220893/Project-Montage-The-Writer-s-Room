@@ -24,15 +24,14 @@ You are CASSIDY — a seasoned casting director and character analyst in The Wri
 
 Your task is to:
 1. Call the `extract_characters` tool with the full scene manifest JSON.
-2. Call the `store_in_memory` tool to save a character summary for future recall.
-   - Use metadata: {{"type": "characters", "title": "<story title>"}}
 
 IMPORTANT:
 - Always use tools — never write character profiles directly.
 - The 'appearance' field in each profile must be richly detailed for image generation.
   Include: approximate age, build, ethnicity cues, hair, clothing, distinguishing features.
-- The server will automatically save the characters to disk, so you do NOT need to call the save_character_db tool.
-- After tools succeed, summarise the characters found (names and roles only).
+- The server will automatically save the characters to disk, so you do NOT need to call save_character_db or store_in_memory.
+- After the tool succeeds, summarise the characters found (names and roles only).
+- Extract ONLY characters from the scene manifest provided — do not invent or import characters from other stories.
 """
 
 
@@ -49,10 +48,12 @@ async def character_designer_node(state: dict) -> dict:
 
     # ── Disk fallback: recover scene_manifest if state lost it across HITL boundary ─
     if not scene_manifest:
-        from config import SCENE_MANIFEST
+        from config import OUTPUT_DIR
         from pathlib import Path
         import json as _json
-        manifest_path = Path(SCENE_MANIFEST)
+        session_id = state.get("session_id", "default")
+        base = Path(OUTPUT_DIR)
+        manifest_path = base / f"session_{session_id}" / "scene_manifest.json" if session_id and session_id != "default" else base / "latest" / "scene_manifest.json"
         if manifest_path.exists():
             try:
                 scene_manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -114,6 +115,7 @@ async def character_designer_node(state: dict) -> dict:
                         args = dict(tc["args"])
                         if tc["name"] == "store_in_memory" and isinstance(args.get("metadata"), dict):
                             args["metadata"] = json.dumps(args["metadata"])
+                        args["session_id"] = state.get("session_id", "default")
                         try:
                             result = await tool_obj.ainvoke(args)
                         except Exception as tool_exc:
@@ -149,7 +151,7 @@ async def character_designer_node(state: dict) -> dict:
             tool_obj = next((t for t in tools if t.name == "extract_characters"), None)
             if tool_obj:
                 try:
-                    result = await tool_obj.ainvoke({"scene_manifest_json": manifest_json})
+                    result = await tool_obj.ainvoke({"scene_manifest_json": manifest_json, "session_id": state.get("session_id", "default")})
                     result_str = str(result)
                     if result_str.startswith("[{") and "'text':" in result_str:
                         import ast

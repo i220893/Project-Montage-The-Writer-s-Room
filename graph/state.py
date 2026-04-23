@@ -50,12 +50,14 @@ class WritersRoomState(dict):
     # ── Metadata ─────────────────────────────────────────────────────────────
     current_agent:     Optional[str]
     error:             Optional[str]
+    session_id:        Optional[str]
 
 
 def initial_state(
     mode: Literal["generate", "validate"],
     user_prompt: Optional[str] = None,
     raw_script: Optional[str]  = None,
+    session_id: Optional[str]  = None,
 ) -> dict:
     """
     Return a clean initial state dict for starting a new pipeline run.
@@ -80,4 +82,5 @@ def initial_state(
         "image_paths":       [],
         "current_agent":     None,
         "error":             None,
+        "session_id":        session_id,
     }

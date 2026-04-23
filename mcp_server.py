@@ -59,6 +59,16 @@ from config import (
 Path(IMAGE_ASSETS_DIR).mkdir(parents=True, exist_ok=True)
 Path("./outputs").mkdir(parents=True, exist_ok=True)
 
+def get_session_dir(session_id: str) -> Path:
+    from config import OUTPUT_DIR
+    base = Path(OUTPUT_DIR)
+    if session_id and session_id != "default":
+        out = base / f"session_{session_id}"
+    else:
+        out = base / "latest"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
 mcp = FastMCP("writers_room")
 
 
@@ -70,7 +80,7 @@ mcp = FastMCP("writers_room")
 # ============================================================
 
 @mcp.tool()
-def generate_screenplay(prompt: str, num_scenes: int = 3) -> str:
+def generate_screenplay(prompt: str, num_scenes: int = 3, session_id: str = "default") -> str:
     """
     Transform a story prompt into a structured multi-scene screenplay JSON.
 
@@ -158,7 +168,7 @@ Rules:
         
     try:
         data = json.loads(raw)
-        path = Path(SCENE_MANIFEST)
+        path = get_session_dir(session_id) / "scene_manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return raw
@@ -173,7 +183,7 @@ Rules:
 # ============================================================
 
 @mcp.tool()
-def validate_script_structure(script_text: str) -> str:
+def validate_script_structure(script_text: str, session_id: str = "default") -> str:
     """
     Validate a screenplay for structural correctness.
 
@@ -253,7 +263,7 @@ Return ONLY this JSON (no markdown):
 # ============================================================
 
 @mcp.tool()
-def extract_characters(scene_manifest_json: str) -> str:
+def extract_characters(scene_manifest_json: str, session_id: str = "default") -> str:
     """
     Extract structured character profiles from a scene manifest JSON.
 
@@ -303,18 +313,6 @@ Return ONLY this JSON (no markdown, no extra text):
 
 Be as visually descriptive as possible in 'appearance' — it will be used to generate images."""
 
-    # ── [Continuity Memory] Auto-fetch past characters from FAISS ─────────────
-    # We use the logline or the whole text as a query to find relevant past chars
-    try:
-        manifest_dict = json.loads(scene_manifest_json)
-        query = manifest_dict.get("logline", "main characters")
-    except Exception:
-        query = "main characters"
-
-    past_context = search_memory(query, k=3)
-    if past_context and past_context != "[]":
-        system_prompt += f"\n\n[MEMORY/CONTINUITY CONTEXT]\nHere are characters/scripts from the past:\n{past_context}\nIf any character from the current script matches a past character identity above, rigorously use their previous appearance, traits, and role to maintain continuity!"
-
     response = llm.invoke([
         SystemMessage(content=system_prompt),
         HumanMessage(content=f"Extract characters from:\n\n{scene_manifest_json}"),
@@ -336,19 +334,14 @@ Be as visually descriptive as possible in 'appearance' — it will be used to ge
 
     try:
         data = json.loads(raw)
-        path = Path(CHARACTER_DB)
+        path = get_session_dir(session_id) / "character_db.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         
-        # ── [Continuity Memory] Save these new profiles to FAISS ──────────────
-        try:
-            for char_name, char_data in data.items():
-                store_in_memory(
-                    text=f"Character Name: {char_name}\nProfile: {json.dumps(char_data)}",
-                    metadata={"type": "character", "name": char_name}
-                )
-        except Exception as memory_err:
-            print(f"Warning: Failed to save character to memory: {memory_err}")
+        # NOTE: Auto-save to FAISS is intentionally disabled here.
+        # Storing extracted characters in shared FAISS memory caused cross-session
+        # contamination: future sessions would pull old characters (e.g. T'Challa)
+        # from the index and use them instead of the newly generated script's characters.
             
         return raw
     except Exception as e:
@@ -362,7 +355,7 @@ Be as visually descriptive as possible in 'appearance' — it will be used to ge
 # ============================================================
 
 @mcp.tool()
-def generate_character_image(character_name: str, visual_description: str) -> str:
+def generate_character_image(character_name: str, visual_description: str, session_id: str = "default") -> str:
     """
     Generate a cinematic character portrait using the ComfyUI or Gemini image generation API.
 
@@ -408,7 +401,7 @@ def generate_character_image(character_name: str, visual_description: str) -> st
                 prompt=visual_description,
                 workflow_path=COMFYUI_WORKFLOW,
                 base_url=get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL),
-                output_dir=IMAGE_ASSETS_DIR,
+                output_dir=str(get_session_dir(session_id) / "image_assets"),
                 timeout=COMFYUI_TIMEOUT,
             ))
             return result_path
@@ -443,7 +436,7 @@ def generate_character_image(character_name: str, visual_description: str) -> st
         if part.inline_data is not None:
             img_bytes = base64.b64decode(part.inline_data.data)
             safe_name = character_name.replace(" ", "/").replace("/", "_")  # fixed typo in original code
-            out_path  = Path(IMAGE_ASSETS_DIR) / f"{safe_name}.png"
+            out_path  = get_session_dir(session_id) / "image_assets" / f"{safe_name}.png"
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(img_bytes)
             return str(out_path.resolve())
@@ -457,7 +450,7 @@ def generate_character_image(character_name: str, visual_description: str) -> st
 # ============================================================
 
 @mcp.tool()
-def save_scene_manifest(manifest_json: str) -> str:
+def save_scene_manifest(manifest_json: str, session_id: str = "default") -> str:
     """
     Save the scene manifest JSON. (This is now handled automatically).
     """
@@ -470,7 +463,7 @@ def save_scene_manifest(manifest_json: str) -> str:
 # ============================================================
 
 @mcp.tool()
-def save_character_db(character_db_json: str) -> str:
+def save_character_db(character_db_json: str, session_id: str = "default") -> str:
     """
     Save the character database JSON. (This is now handled automatically).
     """

@@ -183,10 +183,13 @@ async def on_message(message: cl.Message):
 async def _run_pipeline(user_input: str, mode: str, thread_config: dict):
     """Build initial state and stream through the LangGraph workflow."""
 
+    session_id = thread_config.get("configurable", {}).get("thread_id", "default")
+
     state = initial_state(
         mode        = mode,
         user_prompt = user_input if mode == "generate" else None,
         raw_script  = user_input if mode == "validate" else None,
+        session_id  = session_id,
     )
 
     await cl.Message(
@@ -335,15 +338,21 @@ async def _resume_after_hitl(approved: bool, thread_config: dict):
     cl.user_session.set("awaiting_hitl", False)
 
     # ── Recover scene_manifest from disk if state lost it across HITL boundary ─
-    from config import SCENE_MANIFEST
+    from config import OUTPUT_DIR
     current_state = graph.get_state(thread_config).values
     scene_manifest = current_state.get("scene_manifest")
+    session_id = thread_config.get("configurable", {}).get("thread_id", "default")
     if not scene_manifest:
-        manifest_path = Path(SCENE_MANIFEST)
+        base = Path(OUTPUT_DIR)
+        manifest_path = (
+            base / f"session_{session_id}" / "scene_manifest.json"
+            if session_id and session_id != "default"
+            else base / "latest" / "scene_manifest.json"
+        )
         if manifest_path.exists():
             try:
                 scene_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                logger.info("[HITL] Recovered scene_manifest from disk: %s", str(manifest_path))
+                logger.info("[HITL] Recovered scene_manifest from session path: %s", str(manifest_path))
             except Exception as e:
                 logger.warning("[HITL] Could not read scene_manifest from disk: %s", e)
 
@@ -405,6 +414,9 @@ async def _send_deliverables(state: dict):
         content="---\n## 🎬 Writer's Room — Pipeline Complete!\n\nHere are your deliverables:"
     ).send()
 
+    session_id = state.get("session_id", "latest")
+    out_dir = f"outputs/session_{session_id}" if session_id and session_id != "latest" else "outputs/latest"
+
     # ── 1. Scene Manifest ─────────────────────────────────────────────────────
     manifest = state.get("scene_manifest")
     if manifest:
@@ -419,7 +431,7 @@ async def _send_deliverables(state: dict):
                 f"**Logline:** {logline}\n"
                 f"**Scenes:** {n_scenes}\n\n"
                 f"```json\n{preview}\n```\n"
-                f"*Full file saved → `outputs/scene_manifest.json`*"
+                f"*Full file saved → `{out_dir}/scene_manifest.json`*"
             )
         ).send()
     else:
@@ -439,7 +451,7 @@ async def _send_deliverables(state: dict):
                 f"### 👥 Character Database\n"
                 f"{char_summary}\n\n"
                 f"```json\n{preview}\n```\n"
-                f"*Full file saved → `outputs/character_db.json`*"
+                f"*Full file saved → `{out_dir}/character_db.json`*"
             )
         ).send()
     else:

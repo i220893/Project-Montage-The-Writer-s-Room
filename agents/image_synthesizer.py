@@ -51,10 +51,12 @@ async def image_synthesizer_node(state: dict) -> dict:
 
     # ── Disk fallback: recover character_db if state lost it ─────────────────
     if not character_db:
-        from config import CHARACTER_DB
+        from config import OUTPUT_DIR
         from pathlib import Path
         import json as _json
-        char_db_path = Path(CHARACTER_DB)
+        session_id = state.get("session_id", "default")
+        base = Path(OUTPUT_DIR)
+        char_db_path = base / f"session_{session_id}" / "character_db.json" if session_id and session_id != "default" else base / "latest" / "character_db.json"
         if char_db_path.exists():
             try:
                 character_db = _json.loads(char_db_path.read_text(encoding="utf-8"))
@@ -124,7 +126,9 @@ async def image_synthesizer_node(state: dict) -> dict:
                     if tool_obj is None:
                         result = f"ERROR: tool '{tc['name']}' not found."
                     else:
-                        result = await tool_obj.ainvoke(tc["args"])
+                        tc_args = dict(tc["args"])
+                        tc_args["session_id"] = state.get("session_id", "default")
+                        result = await tool_obj.ainvoke(tc_args)
 
                     # ── Unwrap MCP Adapter List Format ────────────────────────
                     result_str = str(result)

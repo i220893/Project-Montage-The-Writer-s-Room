@@ -24,13 +24,13 @@ SCRIPTWRITER_SYSTEM = """\
 You are ARIA — a professional Hollywood screenwriter working in The Writer's Room.
 
 Your task is to:
-1. First, call `search_memory` explicitly to hunt for existing story continuity, characters, or locations using keywords from the user's prompt!
-2. Call the `generate_screenplay` tool with the user's story prompt. If you found past characters in memory, rigorously weave them into the new script to maintain cross-episode continuity.
-3. Wait for it to succeed, and then politely confirm completion.
+1. Call the `generate_screenplay` tool with the user's story prompt.
+2. Wait for it to succeed, then politely confirm completion.
 
 IMPORTANT:
 - The server will automatically save the script, you do NOT need to call save tools.
 - Use num_scenes=3 unless the user specifies otherwise.
+- Generate ONLY characters that belong to the user's new story — do not reference or import characters from other stories.
 """
 
 
@@ -87,7 +87,9 @@ async def scriptwriter_node(state: dict) -> dict:
                     if tool_obj is None:
                         result = f"ERROR: tool '{tc['name']}' not found on MCP server."
                     else:
-                        result = await tool_obj.ainvoke(tc["args"])
+                        tc_args = dict(tc["args"])
+                        tc_args["session_id"] = state.get("session_id", "default")
+                        result = await tool_obj.ainvoke(tc_args)
 
                     # ── Unwrap MCP Adapter List Format ────────────────────────
                     result_str = str(result)
@@ -111,16 +113,11 @@ async def scriptwriter_node(state: dict) -> dict:
                         except (json.JSONDecodeError, TypeError):
                             logger.warning("[Scriptwriter] Could not parse screenplay JSON.")
 
-            # ── Auto-Save to Continuity Database (FAISS) ──────────────────
-            if scene_manifest:
-                store_tool = next((t for t in tools if t.name == "store_in_memory"), None)
-                if store_tool:
-                    try:
-                        logger.info("[Scriptwriter] Saving script to FAISS for future recall...")
-                        meta = json.dumps({"type": "script", "title": scene_manifest.get("title", "Untitled")})
-                        await store_tool.ainvoke({"text": json.dumps(scene_manifest), "metadata": meta})
-                    except Exception as e:
-                        logger.warning("[Scriptwriter] Auto-save to memory failed: %s", e)
+            # NOTE: Auto-save to FAISS is intentionally disabled here.
+            # Storing scripts in shared FAISS memory caused the character_designer
+            # to pull characters from old sessions during `extract_characters`.
+            # Cross-session continuity can be re-enabled in a future feature
+            # with session-scoped FAISS indexes.
 
     except Exception as exc:
         logger.error("[Scriptwriter] Error: %s", exc, exc_info=True)

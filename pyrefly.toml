@@ -1,0 +1,29 @@
+[tool.pyrefly]
+# 1. EXCLUDE DATA AND ASSETS
+# These folders contain non-code data that bloat the index
+project-excludes = [
+    "**/__pycache__",
+    "outputs",        # Contains faiss_index and image_assets (Massive RAM savers)
+    ".chainlit",      # You have 20+ translation JSONs here
+    "memory",         # Likely contains vector store or history data
+    "**/.venv",
+    "**/venv"
+]
+
+# 2. SKIP HEAVY LIBRARY ANALYSIS
+# Pyrefly spends a lot of RAM trying to "understand" these massive libraries.
+# This forces it to treat them as 'Any', saving hundreds of MBs.
+replace-imports-with-any = [
+    "torch", 
+    "faiss", 
+    "comfyui", 
+    "pydantic", 
+    "numpy", 
+    "pandas"
+]
+
+# 3. DISABLE EXPENSIVE INFERENCE
+# On a 16GB system, you don't want Pyrefly "guessing" return types in the background.
+infer-return-types = "never"
+check-unannotated-defs = false
+enable-reference-index = false  # Disables 'Find All References' to save memory
