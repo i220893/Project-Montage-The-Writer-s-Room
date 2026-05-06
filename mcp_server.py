@@ -52,7 +52,8 @@ from config import (
     COMFYUI_BASE_URL,
     COMFYUI_WORKFLOW,
     COMFYUI_TIMEOUT,
-    OLLAMA_BASE_URL
+    OLLAMA_BASE_URL,
+    POLLINATIONS_MODEL,
 )
 
 # ── Ensure output directories exist ──────────────────────────────────────────
@@ -107,12 +108,14 @@ def generate_screenplay(prompt: str, num_scenes: int = 3, session_id: str = "def
     from langchain_core.messages import SystemMessage, HumanMessage
 
     # ── Free ComfyUI VRAM before loading Qwen ───────────────────────────────────
+    # Wait 4 s (not 2 s) — ComfyUI needs extra time to drain residual GPU ops
+    # after a Flux generation, especially when the previous run ended abruptly.
     if get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND) == "comfyui":
         try:
             from comfyui.vram_manager import free_comfyui_vram, wait_for_vram_clear
             freed = _run_async(free_comfyui_vram(get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL)))
             if freed:
-                _run_async(wait_for_vram_clear(2.0))
+                _run_async(wait_for_vram_clear(4.0))
         except ImportError:
             pass  # comfyui package absent — skip
 
@@ -205,7 +208,7 @@ def validate_script_structure(script_text: str, session_id: str = "default") -> 
             from comfyui.vram_manager import free_comfyui_vram, wait_for_vram_clear
             freed = _run_async(free_comfyui_vram(get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL)))
             if freed:
-                _run_async(wait_for_vram_clear(2.0))
+                _run_async(wait_for_vram_clear(4.0))
         except ImportError:
             pass  # comfyui package absent — skip
 
@@ -289,7 +292,7 @@ def extract_characters(scene_manifest_json: str, session_id: str = "default") ->
             from comfyui.vram_manager import free_comfyui_vram, wait_for_vram_clear
             freed = _run_async(free_comfyui_vram(get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL)))
             if freed:
-                _run_async(wait_for_vram_clear(2.0))
+                _run_async(wait_for_vram_clear(4.0))
         except ImportError:
             pass  # comfyui package absent — skip
 
@@ -367,20 +370,22 @@ def generate_character_image(character_name: str, visual_description: str, sessi
         Absolute path to the saved PNG file, or an error message string.
     """
     from config import get_dynamic_setting
-    
-    # ── State for VRAM offloading ─────────────────────────────────────────────
-    # We use a module-level global to only offload once per process if needed
-    global _already_offloaded
-    if '_already_offloaded' not in globals():
-        _already_offloaded = False
+
+    # ── Build the shared prompt string (used by Pollinations & Gemini) ────────
+    image_prompt = (
+        f"Cinematic character portrait, professional film still. "
+        f"Character: {character_name}. "
+        f"Description: {visual_description}. "
+        f"Style: dramatic lighting, high detail, photorealistic, movie poster quality."
+    )
 
     backend = get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND)
-    
+
+    # ── Backend 1: ComfyUI (local GPU, best quality) ──────────────────────────
     if backend == "comfyui":
-        # Check if we need to offload Ollama Model first
+        # Always evict the Ollama model before each image generation.
         active_provider = get_dynamic_setting("ACTIVE_PROVIDER", "ollama")
-        
-        if active_provider == "ollama" and not _already_offloaded:
+        if active_provider == "ollama":
             try:
                 from comfyui.vram_manager import offload_ollama_model, wait_for_vram_clear
                 model_name = get_dynamic_setting("OLLAMA_MODEL", "qwen2.5:7b-instruct-q4_K_M")
@@ -390,7 +395,6 @@ def generate_character_image(character_name: str, visual_description: str, sessi
                 ))
                 if success:
                     _run_async(wait_for_vram_clear(3.0))
-                _already_offloaded = True
             except ImportError:
                 print("Warning: comfyui.vram_manager not found. Skipping VRAM offloading.")
 
@@ -406,22 +410,32 @@ def generate_character_image(character_name: str, visual_description: str, sessi
             ))
             return result_path
         except ImportError:
-            print("Warning: comfyui.comfyui_client not found. Falling back to Gemini.")
+            print("Warning: comfyui.comfyui_client not found. Falling back to Pollinations.")
+        except Exception as comfy_exc:
+            print(f"Warning: ComfyUI generation failed ({comfy_exc}). Falling back to Pollinations.")
 
-    # ── Fallback to Gemini ────────────────────────────────────────────────────
+    # ── Backend 2: Pollinations.ai (free cloud, no key/GPU required) ──────────
+    if backend in ("pollinations", "comfyui"):  # comfyui falls through if it failed
+        try:
+            from pollinations_client import generate_image_pollinations
+            poll_model = get_dynamic_setting("POLLINATIONS_MODEL", POLLINATIONS_MODEL)
+            result_path = _run_async(generate_image_pollinations(
+                character_name=character_name,
+                prompt=image_prompt,
+                output_dir=str(get_session_dir(session_id) / "image_assets"),
+                model=poll_model,
+                timeout=90.0,
+            ))
+            return result_path
+        except Exception as poll_exc:
+            print(f"Warning: Pollinations generation failed ({poll_exc}). Falling back to Gemini.")
+
+    # ── Backend 3: Gemini (paid, requires GEMINI_API_KEY) ─────────────────────
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-    
     image_model_name = get_dynamic_setting("IMAGE_GEN_MODEL", "gemini-2.5-flash-image")
-
-    image_prompt = (
-        f"Cinematic character portrait, professional film still. "
-        f"Character: {character_name}. "
-        f"Description: {visual_description}. "
-        f"Style: dramatic lighting, high detail, photorealistic, movie poster quality."
-    )
 
     response = client.models.generate_content(
         model=image_model_name,
@@ -431,17 +445,16 @@ def generate_character_image(character_name: str, visual_description: str, sessi
         ),
     )
 
-    # Extract the first image part from the response
     for part in response.candidates[0].content.parts:
         if part.inline_data is not None:
             img_bytes = base64.b64decode(part.inline_data.data)
-            safe_name = character_name.replace(" ", "/").replace("/", "_")  # fixed typo in original code
+            safe_name = character_name.strip().replace(" ", "_").replace("/", "_")
             out_path  = get_session_dir(session_id) / "image_assets" / f"{safe_name}.png"
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(img_bytes)
             return str(out_path.resolve())
 
-    return f"ERROR: Image generation produced no image part for '{character_name}'."
+    return f"ERROR: All image generation backends failed for '{character_name}'."
 
 
 # ============================================================

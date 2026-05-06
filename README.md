@@ -11,8 +11,8 @@ This project strictly adheres to a decentralized **Supervisor-Worker** design pa
 - **Workflow Orchestration**: LangGraph (`StateGraph` w/ strictly typed Redux schema)
 - **Tool Protocol**: FastMCP (`mcp[server]`, `langchain-mcp-adapters`) via `streamable_http`
 - **UI & Interrupts**: Chainlit (with Human-in-the-Loop checkpoints and dynamic system settings)
-- **Agent LLMs**: Qwen-2.5 7B via Ollama (Local default), Groq (Llama), Google (Gemini)
-- **Image Generation**: Local ComfyUI (Flux-2-Klein 9B) with failover to Gemini (`gemini-2.5-flash-image`)
+- **Agent LLMs**: Qwen-2.5 7B via Ollama (Local), Groq (Llama), Google (Gemini)
+- **Image Generation**: Cloud via Pollinations.ai (Free Flux, Hardware-Agnostic default) with support for Local ComfyUI (GPU) and Gemini (Paid API fallback)
 - **Semantic Memory**: FAISS + HuggingFace Sentence Transformers (`all-MiniLM-L6-v2`)
 - **Resource Management**: Custom VRAM orchestration layer for concurrent 8GB GPU pipelines
 
@@ -41,8 +41,8 @@ This project strictly adheres to a decentralized **Supervisor-Worker** design pa
    cp .env.example .env
    ```
    Add fallback keys if you plan to use Cloud APIs instead of pure Local generation:
-   - `GROQ_API_KEY`: Required for Llama/Groq logic fallback.
-   - `GEMINI_API_KEY`: Required for Image Generation if ComfyUI is uninstalled.
+   - `GROQ_API_KEY`: Required for Llama/Groq text generation.
+   - `GEMINI_API_KEY`: Required only if you select Gemini as your image fallback (Pollinations.ai is 100% free and requires no key).
 
 3. *(Optional)* **ComfyUI Integration**
    - Ensure a local instance of ComfyUI is running on port `8188`.
@@ -83,7 +83,7 @@ Open a second terminal, activate the same environment, and run:
 ```bash
 chainlit run app.py --port 8001
 ```
-*Your browser will pop open automatically. The server performs a handshake and gracefully falls back to Gemini if ComfyUI is unreachable.*
+*Your browser will pop open automatically. The server performs a handshake and uses Pollinations.ai by default, with automatic failovers between ComfyUI and Gemini based on your settings.*
 
 ---
 

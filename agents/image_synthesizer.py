@@ -105,10 +105,23 @@ async def image_synthesizer_node(state: dict) -> dict:
                 ),
             ]
 
-            # Allow enough steps for one tool call per character + final answer
+            # One tool call per character + one final LLM turn (avoided when all done early)
             max_steps = (n_chars * 2) + 2
 
             for step in range(max_steps):
+                # ── Early-exit: all images collected — skip the final Ollama call ──────
+                # After the last image is generated ComfyUI's Flux model is still hot in
+                # VRAM.  The next llm_bound.ainvoke() would try to reload Qwen, but there
+                # isn't enough free RAM for both models simultaneously.  The final call
+                # only produces a human-readable summary we never use, so we bail here.
+                if len(image_paths) >= n_chars:
+                    logger.info(
+                        "[ImageSynthesizer] All %d image(s) collected — skipping final "
+                        "LLM wrap-up call to avoid Ollama/ComfyUI RAM collision.",
+                        n_chars,
+                    )
+                    break
+
                 ai_msg = await llm_bound.ainvoke(messages)
                 messages.append(ai_msg)
 

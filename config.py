@@ -56,16 +56,66 @@ COMFYUI_WORKFLOW: str   = os.getenv("COMFYUI_WORKFLOW", "./comfyui/image_flux2_t
 COMFYUI_TIMEOUT: int    = int(os.getenv("COMFYUI_TIMEOUT", "300"))  # seconds
 
 # ── Image generation backend ─────────────────────────────────────────────────
-# Default: "comfyui" | Fallback: "gemini"
-IMAGE_GEN_BACKEND: str  = os.getenv("IMAGE_GEN_BACKEND", "comfyui")
+# "comfyui"      — Local GPU via ComfyUI + Flux 9B (best quality, needs GPU)
+# "pollinations" — Free cloud API, no key/GPU required (recommended default)
+# "gemini"       — Google Gemini image API (paid, requires GEMINI_API_KEY)
+IMAGE_GEN_BACKEND: str     = os.getenv("IMAGE_GEN_BACKEND", "pollinations")
+POLLINATIONS_MODEL: str    = os.getenv("POLLINATIONS_MODEL", "flux")
+
+import logging as _logging
+_config_log = _logging.getLogger(__name__)
+
+
+def _resolve_text_provider() -> str:
+    """
+    Resolve which text-generation provider to actually use.
+
+    The ComfyUI + Ollama combination causes an irrecoverable RAM conflict on
+    systems with ≤ 16 GB RAM:
+      - ComfyUI loads Flux 9B → holds ~4–5 GB of system RAM in its Python heap.
+      - Python never returns heap pages to the OS, so free_comfyui_vram() only
+        clears GPU VRAM — system RAM stays consumed.
+      - Qwen 7B (Q4_K_M) needs ~2.2 GB of system RAM to load.
+      - With only ~1–1.5 GB free, Ollama throws "model requires more system
+        memory than is available".
+
+    Fix: when ComfyUI is the image backend AND Ollama is requested AND a Groq
+    API key is present, silently promote the provider to "groq".  This routes
+    all text generation through the cloud (zero local RAM) while keeping image
+    generation fully local on the GPU.
+
+    Override: set FORCE_TEXT_PROVIDER=ollama in .env to disable this behaviour.
+    """
+    requested = get_dynamic_setting("ACTIVE_PROVIDER", "ollama")
+
+    if (
+        requested == "ollama"
+        and get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND) == "comfyui"
+        and GROQ_API_KEY
+        and get_dynamic_setting("FORCE_TEXT_PROVIDER", "") != "ollama"
+    ):
+        _config_log.info(
+            "[Config] ComfyUI+Ollama RAM conflict detected: auto-promoting text "
+            "provider from Ollama → Groq (cloud). ComfyUI holds ~4–5 GB of system "
+            "RAM that Python cannot release; Qwen 7B needs 2.2 GB more. "
+            "To force Ollama anyway, set FORCE_TEXT_PROVIDER=ollama in .env."
+        )
+        return "groq"
+
+    return requested
 
 
 def get_llm(temperature: float = 0.7):
     """
     Factory function — returns the correct LangChain chat model based on
     dynamically loaded settings from the Chainlit UI or .env.
+
+    When ComfyUI is the image backend and Ollama is configured, this function
+    automatically promotes the provider to Groq to avoid the RAM conflict
+    between Flux 9B (held by ComfyUI's Python process) and Qwen 7B.
+    See _resolve_text_provider() for full details.
     """
-    active_provider = get_dynamic_setting("ACTIVE_PROVIDER", "ollama")
+    active_provider = _resolve_text_provider()
 
     if active_provider == "groq":
         from langchain_groq import ChatGroq
@@ -100,9 +150,12 @@ def get_llm(temperature: float = 0.7):
 
 def model_info() -> str:
     """Return a human-readable string describing the active model config."""
-    active_provider = get_dynamic_setting("ACTIVE_PROVIDER", "ollama")
+    active_provider = _resolve_text_provider()
     if active_provider == "groq":
-        return f"Groq / {get_dynamic_setting('GROQ_MODEL', 'llama-3.1-8b-instant')}"
+        groq_model = get_dynamic_setting("GROQ_MODEL", "llama-3.1-8b-instant")
+        requested   = get_dynamic_setting("ACTIVE_PROVIDER", "ollama")
+        suffix = " [auto: ComfyUI RAM conflict]" if requested == "ollama" else ""
+        return f"Groq / {groq_model}{suffix}"
     elif active_provider == "google":
         return f"Google Gemini / {get_dynamic_setting('GEMINI_CHAT_MODEL', 'gemini-2.0-flash')}"
     elif active_provider == "ollama":

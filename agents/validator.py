@@ -45,6 +45,19 @@ async def validator_node(state: dict) -> dict:
     """
     logger.info("[Validator] Starting | Model: %s", model_info())
 
+    # ── Free ComfyUI VRAM before loading Qwen for orchestration ───────────────
+    from config import IMAGE_GEN_BACKEND, COMFYUI_BASE_URL, get_dynamic_setting
+    if get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND) == "comfyui":
+        try:
+            from comfyui.vram_manager import free_comfyui_vram, wait_for_vram_clear
+            freed = await free_comfyui_vram(
+                get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL)
+            )
+            if freed:
+                await wait_for_vram_clear(4.0)
+        except ImportError:
+            pass  # comfyui package absent — skip
+
     # ── Determine what to validate ────────────────────────────────────────────
     if state.get("raw_script"):
         script_text = state["raw_script"]

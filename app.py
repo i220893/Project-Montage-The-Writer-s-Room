@@ -53,31 +53,55 @@ async def on_start():
     await cl.ChatSettings([
         cl.input_widget.Select(
             id="ACTIVE_PROVIDER",
-            label="Agent LLM Provider",
+            label="1. Text LLM Provider",
             values=["groq", "google", "ollama"],
             initial_index=["groq", "google", "ollama"].index(get_dynamic_setting("ACTIVE_PROVIDER", "ollama")),
         ),
         cl.input_widget.Select(
+            id="GROQ_MODEL",
+            label="↳ [If Groq] Model",
+            values=["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "gemma2-9b-it"],
+            initial_index=["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "gemma2-9b-it"].index(
+                get_dynamic_setting("GROQ_MODEL", "llama-3.1-8b-instant")
+                if get_dynamic_setting("GROQ_MODEL", "llama-3.1-8b-instant") in ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "gemma2-9b-it"]
+                else "llama-3.1-8b-instant"
+            ),
+        ),
+        cl.input_widget.Select(
             id="OLLAMA_MODEL",
-            label="Ollama Model",
-            values=["qwen2.5:7b-instruct-q4_K_M", "llama3.2"],
+            label="↳ [If Ollama] Model",
+            values=["qwen2.5:7b-instruct-q4_K_M", "qwen2.5:1.5b-instruct", "llama3.2"],
             initial_index=0,
         ),
         cl.input_widget.Select(
             id="IMAGE_GEN_BACKEND",
-            label="Image Generation Backend",
-            values=["comfyui", "gemini"],
-            initial_index=["comfyui", "gemini"].index(get_dynamic_setting("IMAGE_GEN_BACKEND", "comfyui")),
+            label="2. Image Generation Backend",
+            values=["pollinations", "comfyui", "gemini"],
+            initial_index=["pollinations", "comfyui", "gemini"].index(
+                get_dynamic_setting("IMAGE_GEN_BACKEND", "pollinations")
+                if get_dynamic_setting("IMAGE_GEN_BACKEND", "pollinations") in ["pollinations", "comfyui", "gemini"]
+                else "pollinations"
+            ),
+        ),
+        cl.input_widget.Select(
+            id="POLLINATIONS_MODEL",
+            label="↳ [If Pollinations] Model",
+            values=["flux", "flux-realism", "flux-anime", "flux-3d", "turbo"],
+            initial_index=["flux", "flux-realism", "flux-anime", "flux-3d", "turbo"].index(
+                get_dynamic_setting("POLLINATIONS_MODEL", "flux")
+                if get_dynamic_setting("POLLINATIONS_MODEL", "flux") in ["flux", "flux-realism", "flux-anime", "flux-3d", "turbo"]
+                else "flux"
+            ),
         ),
         cl.input_widget.Select(
             id="COMFYUI_WORKFLOW_NAME",
-            label="ComfyUI Workflow",
+            label="↳ [If ComfyUI] Workflow",
             values=["flux_dev", "flux_schnell"],
             initial_index=0,
         ),
         cl.input_widget.Select(
             id="IMAGE_GEN_MODEL",
-            label="Gemini Image Model (fallback only)",
+            label="↳ [If Gemini] Model",
             values=["gemini-2.0-flash-preview-image-generation", "gemini-2.5-flash-image", "gemini-3.0-pro-image"],
             initial_index=1,
         )
@@ -95,15 +119,18 @@ async def on_start():
         comfyui_installed = False
         comfy_online = False
     
-    if get_dynamic_setting("IMAGE_GEN_BACKEND", "comfyui") == "comfyui":
+    img_backend = get_dynamic_setting("IMAGE_GEN_BACKEND", "pollinations")
+    if img_backend == "comfyui":
         if comfyui_installed and comfy_online:
             comfy_status = "✅ `ComfyUI Online — Flux model ready`"
         elif comfyui_installed and not comfy_online:
-            comfy_status = "⚠️ `ComfyUI Offline — will fallback to Gemini`"
+            comfy_status = "⚠️ `ComfyUI Offline — will fallback to Pollinations`"
         else:
-            comfy_status = f"⚠️ `ComfyUI module error — will fallback to Gemini`"
+            comfy_status = "⚠️ `ComfyUI module error — will fallback to Pollinations`"
+    elif img_backend == "pollinations":
+        comfy_status = "✅ `Pollinations.ai selected — free cloud image gen, no GPU/key needed`"
     else:
-        comfy_status = "ℹ️ `ComfyUI unused (Gemini selected in settings)`"
+        comfy_status = "ℹ️ `Gemini image API selected (paid)`"
 
     await cl.Message(
         content=(
@@ -197,7 +224,6 @@ async def _run_pipeline(user_input: str, mode: str, thread_config: dict):
     ).send()
 
     try:
-        hitl_errors = None
         stream_gen = graph.astream(state, config=thread_config)
         
         try:
@@ -227,29 +253,23 @@ async def _run_pipeline(user_input: str, mode: str, thread_config: dict):
                         ).send()
                         return
 
-                    # ── HITL: validator found errors → display buttons + stop ──
-                    if node_name == "validator" and node_state.get("validation_errors"):
-                        hitl_errors = node_state["validation_errors"]
-                        break  # break inner loop
-            
-                if hitl_errors:
-                    break  # break outer loop
-
         finally:
             try:
                 await stream_gen.aclose()
             except RuntimeError:
                 pass  # suppress "async generator ignored GeneratorExit" from LangGraph
 
-        if hitl_errors:
-            await _trigger_hitl(hitl_errors, thread_config)
-            return
-
-        # ── Stream finished — check if graph is truly done or just interrupted ──
+        # ── Stream finished — check if graph is paused at HITL interrupt ─────
         state_snapshot = graph.get_state(thread_config)
+
         if state_snapshot.next:
-            # Graph is paused at an interrupt — do NOT show deliverables
+            # Graph is paused at interrupt_before=["character_designer"].
+            # This fires unconditionally — not only when there are errors.
+            # Show HITL UI here regardless of validation result.
             logger.info("[Pipeline] Graph paused at: %s — waiting for HITL.", state_snapshot.next)
+            snap_values    = state_snapshot.values
+            pending_errors = snap_values.get("validation_errors") or []
+            await _trigger_hitl(pending_errors, thread_config)
         else:
             # Graph ran to completion — show deliverables
             await _send_deliverables(state_snapshot.values)
@@ -266,14 +286,22 @@ async def _run_pipeline(user_input: str, mode: str, thread_config: dict):
 async def _trigger_hitl(errors: list[str], thread_config: dict):
     """Pause the graph and ask the user to approve or retry using standard Chainlit Actions."""
     cl.user_session.set("awaiting_hitl", True)
-    error_str = "\n".join(f"  - {e}" for e in errors)
 
-    await cl.Message(
-        content=(
+    if errors:
+        error_str = "\n".join(f"  - {e}" for e in errors)
+        content = (
             f"⚠️ **Validation Issues Found** ({len(errors)} issue(s)):\n"
             f"{error_str}\n\n"
             "How would you like to proceed?"
-        ),
+        )
+    else:
+        content = (
+            "✅ **Script validated successfully — no structural issues found.**\n\n"
+            "Review the generated screenplay above and choose how to proceed:"
+        )
+
+    await cl.Message(
+        content=content,
         actions=[
             cl.Action(
                 name    = "hitl_approve",
@@ -460,7 +488,18 @@ async def _send_deliverables(state: dict):
     # ── 3. Generated Images ────────────────────────────────────────────────────
     image_paths = state.get("image_paths") or []
     if image_paths:
-        await cl.Message(content=f"### 🖼️ Character Portraits ({len(image_paths)} generated)").send()
+        from config import get_dynamic_setting, IMAGE_GEN_BACKEND, POLLINATIONS_MODEL
+        backend = get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND)
+        if backend == "pollinations":
+            model_used = f"Pollinations.ai ({get_dynamic_setting('POLLINATIONS_MODEL', POLLINATIONS_MODEL)})"
+        elif backend == "comfyui":
+            model_used = "ComfyUI (Local Flux)"
+        else:
+            model_used = "Gemini API"
+
+        await cl.Message(
+            content=f"### 🖼️ Character Portraits ({len(image_paths)} generated via {model_used})"
+        ).send()
         for img_path in image_paths:
             if os.path.exists(img_path):
                 char_name = Path(img_path).stem.replace("_", " ")

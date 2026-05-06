@@ -11,10 +11,9 @@
 
 import json
 import logging
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from config import MCP_SERVER_URL, MCP_SERVER_NAME, get_llm, model_info
+from config import MCP_SERVER_URL, MCP_SERVER_NAME, model_info
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +43,19 @@ async def character_designer_node(state: dict) -> dict:
     """
     logger.info("[CharacterDesigner] Starting | Model: %s", model_info())
 
+    # ── Free ComfyUI VRAM before loading Qwen for orchestration ───────────────
+    from config import IMAGE_GEN_BACKEND, COMFYUI_BASE_URL, get_dynamic_setting
+    if get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND) == "comfyui":
+        try:
+            from comfyui.vram_manager import free_comfyui_vram, wait_for_vram_clear
+            freed = await free_comfyui_vram(
+                get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL)
+            )
+            if freed:
+                await wait_for_vram_clear(4.0)
+        except ImportError:
+            pass  # comfyui package absent — skip
+
     scene_manifest = state.get("scene_manifest")
 
     # ── Disk fallback: recover scene_manifest if state lost it across HITL boundary ─
@@ -70,6 +82,7 @@ async def character_designer_node(state: dict) -> dict:
 
     manifest_json = json.dumps(scene_manifest, indent=2)
     character_db  = None
+    messages      = []  # kept for state compatibility
 
     try:
         mcp = MultiServerMCPClient({
@@ -78,91 +91,46 @@ async def character_designer_node(state: dict) -> dict:
                 "transport": "streamable_http",
             }
         })
-        if True:
-            tools     = await mcp.get_tools()
-            llm       = get_llm(temperature=0.3)
-            llm_bound = llm.bind_tools(tools)
+        tools = await mcp.get_tools()
 
-            story_title = scene_manifest.get("title", "Untitled")
+        # ── Direct tool call: bypass LLM-as-orchestrator entirely ────────────
+        #
+        # WHY: The only thing the ReAct loop ever does here is call
+        # `extract_characters(scene_manifest_json=<full screenplay JSON>)`.
+        # To make that tool call, the LLM must re-encode ~8 000 characters of
+        # JSON as an escaped string argument inside another JSON envelope.
+        # Smaller models (llama-3.1-8b-instant, Qwen 7B) reliably produce
+        # malformed escaping → Groq 400 `tool_use_failed` / Ollama garbling.
+        #
+        # The actual AI analysis still runs — it happens INSIDE the MCP tool
+        # (`extract_characters` calls `get_llm()` in mcp_server.py). We just
+        # skip the fragile intermediary "LLM constructs the call arguments" step.
+        tool_obj = next((t for t in tools if t.name == "extract_characters"), None)
+        if tool_obj is None:
+            raise ValueError("extract_characters tool not found on MCP server.")
 
-            messages = [
-                SystemMessage(content=CHARACTER_DESIGNER_SYSTEM),
-                HumanMessage(
-                    content=(
-                        f"Extract all characters from this screenplay for '{story_title}':\n\n"
-                        f"{manifest_json[:8000]}"
-                    )
-                ),
-            ]
+        logger.info("[CharacterDesigner] Calling extract_characters directly (no LLM orchestration).")
+        result = await tool_obj.ainvoke({
+            "scene_manifest_json": manifest_json,
+            "session_id":          state.get("session_id", "default"),
+        })
 
-            max_steps = 6
+        # ── Unwrap MCP Adapter List Format ────────────────────────────────────
+        result_str = str(result)
+        if result_str.startswith("[{") and "'text':" in result_str:
+            try:
+                import ast
+                parsed = ast.literal_eval(result_str)
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    result_str = parsed[0].get("text", result_str)
+            except Exception:
+                pass
 
-            for step in range(max_steps):
-                ai_msg = await llm_bound.ainvoke(messages)
-                messages.append(ai_msg)
+        if result_str.startswith("ERROR"):
+            raise ValueError(f"extract_characters returned an error: {result_str[:300]}")
 
-                if not ai_msg.tool_calls:
-                    logger.info("[CharacterDesigner] Agent finished in %d step(s).", step + 1)
-                    break
-
-                for tc in ai_msg.tool_calls:
-                    logger.info("[CharacterDesigner] Calling tool: %s", tc["name"])
-                    tool_obj = next((t for t in tools if t.name == tc["name"]), None)
-                    if tool_obj is None:
-                        result = f"ERROR: tool '{tc['name']}' not found."
-                    else:
-                        # ── Fix: serialize metadata dict→str for store_in_memory ─
-                        args = dict(tc["args"])
-                        if tc["name"] == "store_in_memory" and isinstance(args.get("metadata"), dict):
-                            args["metadata"] = json.dumps(args["metadata"])
-                        args["session_id"] = state.get("session_id", "default")
-                        try:
-                            result = await tool_obj.ainvoke(args)
-                        except Exception as tool_exc:
-                            # store_in_memory is optional — log but don't crash
-                            logger.warning("[CharacterDesigner] Tool %s failed (non-fatal): %s", tc["name"], tool_exc)
-                            result = f"Tool {tc['name']} failed: {tool_exc}"
-
-                    # ── Unwrap MCP Adapter List Format ────────────────────────
-                    result_str = str(result)
-                    if result_str.startswith("[{") and "'text':" in result_str:
-                        try:
-                            import ast
-                            parsed = ast.literal_eval(result_str)
-                            if isinstance(parsed, list) and len(parsed) > 0:
-                                result_str = parsed[0].get("text", result_str)
-                        except Exception:
-                            pass
-                    result_content = result_str
-
-                    logger.info("[CharacterDesigner] Tool result: %s", result_content[:200])
-                    messages.append(ToolMessage(content=result_content, tool_call_id=tc["id"]))
-
-                    # ── Capture character_db from extract_characters ───────
-                    if tc["name"] == "extract_characters":
-                        try:
-                            character_db = json.loads(result_content)
-                        except (json.JSONDecodeError, TypeError):
-                            logger.warning("[CharacterDesigner] Could not parse character JSON.")
-
-        # ── Direct fallback: if LLM didn't call extract_characters, do it yourself ─
-        if not character_db:
-            logger.warning("[CharacterDesigner] LLM skipped tool call — running extract_characters directly.")
-            tool_obj = next((t for t in tools if t.name == "extract_characters"), None)
-            if tool_obj:
-                try:
-                    result = await tool_obj.ainvoke({"scene_manifest_json": manifest_json, "session_id": state.get("session_id", "default")})
-                    result_str = str(result)
-                    if result_str.startswith("[{") and "'text':" in result_str:
-                        import ast
-                        parsed = ast.literal_eval(result_str)
-                        if isinstance(parsed, list) and len(parsed) > 0:
-                            result_str = parsed[0].get("text", result_str)
-                    character_db = json.loads(result_str)
-                    logger.info("[CharacterDesigner] Fallback extraction succeeded: %d characters.", len(character_db))
-                except Exception as fallback_exc:
-                    logger.error("[CharacterDesigner] Fallback extraction failed: %s", fallback_exc)
-                    raise ValueError(f"Character extraction failed on fallback: {fallback_exc}\nLLM returned: {result_str[:200]}")
+        character_db = json.loads(result_str)
+        logger.info("[CharacterDesigner] Extracted %d character(s).", len(character_db))
 
     except Exception as exc:
         logger.error("[CharacterDesigner] Error: %s", exc, exc_info=True)

@@ -46,6 +46,23 @@ async def scriptwriter_node(state: dict) -> dict:
     """
     logger.info("[Scriptwriter] Starting | Model: %s", model_info())
 
+    # ── Free ComfyUI VRAM before loading Qwen for orchestration ───────────────
+    # The MCP tools free VRAM internally, but the agent's own LLM calls (which
+    # decide which tool to invoke) are NOT protected. If ComfyUI's Flux model
+    # is still hot from a previous image-gen run, Qwen can't load → OOM.
+    # Agents are async so we can await directly (no ThreadPoolExecutor needed).
+    from config import IMAGE_GEN_BACKEND, COMFYUI_BASE_URL, get_dynamic_setting
+    if get_dynamic_setting("IMAGE_GEN_BACKEND", IMAGE_GEN_BACKEND) == "comfyui":
+        try:
+            from comfyui.vram_manager import free_comfyui_vram, wait_for_vram_clear
+            freed = await free_comfyui_vram(
+                get_dynamic_setting("COMFYUI_BASE_URL", COMFYUI_BASE_URL)
+            )
+            if freed:
+                await wait_for_vram_clear(4.0)
+        except ImportError:
+            pass  # comfyui package absent — skip
+
     user_prompt = state.get("user_prompt", "")
     if not user_prompt:
         return {**state, "error": "Scriptwriter: no user_prompt in state.", "current_agent": "scriptwriter"}
